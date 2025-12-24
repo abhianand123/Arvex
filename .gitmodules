@@ -1,0 +1,6 @@
+[submodule "ffMetadataEx"]
+	path = ffMetadataEx
+	url = https://github.com/OuterTune/ffMetadataEx
+[submodule "taglib"]
+	path = taglib
+	url = https://github.com/OuterTune/taglib
