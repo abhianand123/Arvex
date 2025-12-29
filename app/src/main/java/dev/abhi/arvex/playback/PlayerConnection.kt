@@ -19,6 +19,7 @@ import androidx.media3.common.Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM
 import androidx.media3.common.Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM
 import androidx.media3.common.Player.REPEAT_MODE_OFF
 import androidx.media3.common.Player.STATE_ENDED
+import androidx.media3.common.Player.STATE_IDLE
 import androidx.media3.common.Timeline
 import dev.abhi.arvex.db.MusicDatabase
 import dev.abhi.arvex.db.entities.LyricsEntity.Companion.uninitializedLyric
@@ -26,6 +27,7 @@ import dev.abhi.arvex.extensions.currentMetadata
 import dev.abhi.arvex.extensions.getCurrentQueueIndex
 import dev.abhi.arvex.extensions.getQueueWindows
 import dev.abhi.arvex.extensions.metadata
+import dev.abhi.arvex.models.MediaMetadata
 import dev.abhi.arvex.playback.queues.Queue
 import dev.abhi.arvex.utils.reportException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -35,6 +37,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
@@ -49,16 +52,18 @@ class PlayerConnection(
     val TAG = PlayerConnection::class.simpleName.toString()
 
     val service = binder.getService()!!
-    val player = service.player
+    private var listeningPlayer: Player? = null
+    val player: Player
+        get() = service.player
     val scope = binder.viewModelScope
 
-    val playbackState = MutableStateFlow(player.playbackState)
-    private val playWhenReady = MutableStateFlow(player.playWhenReady)
+    val playbackState = MutableStateFlow(STATE_IDLE)
+    private val playWhenReady = MutableStateFlow(false)
     val isPlaying = combine(playbackState, playWhenReady) { playbackState, playWhenReady ->
         playWhenReady && playbackState != STATE_ENDED
-    }.stateIn(scope, SharingStarted.Lazily, player.playWhenReady && player.playbackState != STATE_ENDED)
+    }.stateIn(scope, SharingStarted.Lazily, false)
     val waitingForNetworkConnection: StateFlow<Boolean> = service.waitingForNetworkConnection.asStateFlow()
-    val mediaMetadata = MutableStateFlow(player.currentMetadata)
+    val mediaMetadata = MutableStateFlow<MediaMetadata?>(null)
     val currentSong = mediaMetadata.flatMapLatest {
         database.song(it?.id)
     }
@@ -86,8 +91,19 @@ class PlayerConnection(
     val error = MutableStateFlow<PlaybackException?>(null)
 
     init {
-        player.addListener(this)
+        scope.launch {
+            service.playerFlow.collect { newPlayer: Player? ->
+                if (newPlayer != null) {
+                    listeningPlayer?.removeListener(this@PlayerConnection)
+                    listeningPlayer = newPlayer
+                    newPlayer.addListener(this@PlayerConnection)
+                    updatePlayerState(newPlayer)
+                }
+            }
+        }
+    }
 
+    private fun updatePlayerState(player: Player) {
         playbackState.value = player.playbackState
         playWhenReady.value = player.playWhenReady
         queuePlaylistId.value = service.queuePlaylistId
@@ -96,6 +112,8 @@ class PlayerConnection(
         currentMediaItemIndex.value = player.currentMediaItemIndex
         shuffleModeEnabled.value = player.shuffleModeEnabled
         repeatMode.value = player.repeatMode
+        error.value = player.playerError
+        updateCanSkipPreviousAndNext()
 
         scope.launch {
             mediaMetadata.value = player.currentMetadata ?: database.getResumptionQueue()?.getCurrentSong()

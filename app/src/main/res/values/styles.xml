@@ -1,13 +1,33 @@
-<resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Theme.Arvex" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:windowContentOverlay">@null</item>
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Arvex" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowTranslucentStatus">true</item>
+        <item name="android:windowTranslucentNavigation">true</item>
         <item name="android:windowDrawsSystemBarBackgrounds">true</item>
-        <item name="android:windowMinWidthMinor">100%</item>
-        <item name="android:windowMinWidthMajor">100%</item>
-        <item name="android:windowNoTitle">true</item>
-        <item name="android:windowBackground">#ffffff</item>
-        <item name="android:enforceNavigationBarContrast" tools:ignore="NewApi">false</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+
+        <item name="mediaRouteTheme">@style/CustomMediaRouterTheme</item>
+        <item name="mediaRouteButtonStyle">@style/CustomMediaRouteButtonStyle</item>
+    </style>
+
+    <!-- Theme for MediaRouteButton with solid background -->
+    <style name="Theme.Arvex.MediaRouteButton" parent="Theme.AppCompat.Light.NoActionBar">
+        <item name="colorPrimary">#FF6200EE</item>
+        <item name="colorPrimaryDark">#FF3700B3</item>
+        <item name="colorAccent">#FF03DAC5</item>
+    </style>
+
+    <!-- Custom MediaRouter theme -->
+    <style name="CustomMediaRouterTheme" parent="Theme.MediaRouter">
+        <item name="mediaRouteButtonStyle">@style/CustomMediaRouteButtonStyle</item>
+    </style>
+
+    <!-- Custom MediaRouteButton style -->
+    <style name="CustomMediaRouteButtonStyle" parent="Widget.MediaRouter.MediaRouteButton">
+        <!-- No background override -->
     </style>
 </resources>

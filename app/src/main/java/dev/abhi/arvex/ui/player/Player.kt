@@ -10,7 +10,13 @@
 package dev.abhi.arvex.ui.player
 
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.drawable.BitmapDrawable
+import android.text.format.Formatter
 import android.util.Log
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateContentSize
@@ -108,6 +114,9 @@ import androidx.media3.common.Player.REPEAT_MODE_ONE
 import androidx.media3.common.Player.STATE_ENDED
 import androidx.media3.common.Player.STATE_READY
 import androidx.navigation.NavController
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.mediarouter.app.MediaRouteButton
+import com.google.android.gms.cast.framework.CastButtonFactory
 import coil3.compose.AsyncImage
 import coil3.imageLoader
 import coil3.request.ImageRequest
@@ -148,9 +157,21 @@ import dev.abhi.arvex.utils.makeTimeString
 import dev.abhi.arvex.utils.rememberEnumPreference
 import dev.abhi.arvex.utils.rememberPreference
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.max
+
+// Helper to find Activity context from Compose context
+private fun Context.findActivity(): Activity? {
+    var context = this
+    while (context is ContextWrapper) {
+        if (context is Activity) return context
+        context = context.baseContext
+    }
+    return null
+}
 
 @SuppressLint("UnusedBoxWithConstraintsScope")
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -370,6 +391,40 @@ fun BottomSheetPlayer(
             val actionButtons: @Composable RowScope.() -> Unit = {
                 Log.v(TAG, "PLR-3.xa")
                 Spacer(modifier = Modifier.width(10.dp))
+
+                // Cast Button
+                Box(
+                    modifier = Modifier
+                        .offset(y = 5.dp)
+                        .size(36.dp)
+                        .clip(RoundedCornerShape(24.dp))
+                        .background(MaterialTheme.colorScheme.primary)
+                ) {
+                     AndroidView(
+                         factory = { ctx ->
+                             try {
+                                 // MediaRouteButton requires AppCompat theme with solid background
+                                 val themedContext = androidx.appcompat.view.ContextThemeWrapper(ctx, R.style.Theme_Arvex_MediaRouteButton)
+                                 MediaRouteButton(themedContext).apply {
+                                     // Use Activity context, not Application context
+                                     val activityContext = ctx.findActivity()
+                                     if (activityContext != null) {
+                                         CastButtonFactory.setUpMediaRouteButton(activityContext, this)
+                                     }
+                                 }
+                             } catch (e: Exception) {
+                                 // Fallback if Cast is not available
+                                 android.util.Log.e("Player", "Failed to create MediaRouteButton", e)
+                                 android.widget.FrameLayout(ctx) // Return empty view
+                             }
+                         },
+                         modifier = Modifier.align(Alignment.Center)
+                     )
+                }
+                
+                Spacer(modifier = Modifier.width(7.dp))
+
+
 
                 Box(
                     modifier = Modifier

@@ -76,6 +76,13 @@ class App : Application(), SingletonImageLoader.Factory {
 
         instance = this;
 
+        // Initialize Google Cast framework early
+        try {
+            com.google.android.gms.cast.framework.CastContext.getSharedInstance(this)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize CastContext", e)
+        }
+
         val locale = Locale.getDefault()
         val languageTag = locale.toLanguageTag().replace("-Hant", "") // replace zh-Hant-* to zh-*
         YouTube.locale = YouTubeLocale(

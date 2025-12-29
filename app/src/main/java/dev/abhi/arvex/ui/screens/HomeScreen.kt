@@ -1,6 +1,9 @@
 package dev.abhi.arvex.ui.screens
 
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
@@ -111,11 +114,22 @@ import com.zionhuang.innertube.models.SongItem
 import com.zionhuang.innertube.models.WatchEndpoint
 import com.zionhuang.innertube.models.YTItem
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.random.Random
+
+// Helper to find Activity context from Compose context
+private fun Context.findActivity(): Activity? {
+    var context = this
+    while (context is ContextWrapper) {
+        if (context is Activity) return context
+        context = context.baseContext
+    }
+    return null
+}
 
 @SuppressLint("UnusedBoxWithConstraintsScope")
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
@@ -379,6 +393,27 @@ fun HomeScreen(
                         .fillMaxWidth()
                         .animateItem()
                 ) {
+                    // Cast Button
+                    androidx.compose.ui.viewinterop.AndroidView(
+                        factory = { ctx ->
+                            try {
+                                val themedContext = androidx.appcompat.view.ContextThemeWrapper(ctx, dev.abhi.arvex.R.style.Theme_Arvex_MediaRouteButton)
+                                androidx.mediarouter.app.MediaRouteButton(themedContext).apply {
+                                    // Use Activity context, not Application context
+                                    val activityContext = ctx.findActivity()
+                                    if (activityContext != null) {
+                                        com.google.android.gms.cast.framework.CastButtonFactory.setUpMediaRouteButton(activityContext, this)
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                android.widget.FrameLayout(ctx)
+                            }
+                        },
+                        modifier = Modifier
+                            .padding(end = 12.dp)
+                            .align(Alignment.CenterVertically)
+                    )
+
                     NavigationTile(
                         title = stringResource(R.string.history),
                         icon = Icons.Rounded.History,

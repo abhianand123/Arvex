@@ -106,6 +106,7 @@ import dev.abhi.arvex.models.HybridCacheDataSinkFactory
 import dev.abhi.arvex.models.MediaMetadata
 import dev.abhi.arvex.models.MultiQueueObject
 import dev.abhi.arvex.models.toMediaMetadata
+import dev.abhi.arvex.extensions.toMediaItem
 import dev.abhi.arvex.playback.queues.ListQueue
 import dev.abhi.arvex.playback.queues.Queue
 import dev.abhi.arvex.playback.queues.YouTubeQueue
@@ -131,6 +132,7 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -142,6 +144,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import androidx.media3.cast.CastPlayer
+import androidx.media3.cast.SessionAvailabilityListener
+import com.google.android.gms.cast.framework.CastContext
+import com.google.android.gms.cast.framework.CastSession
+import com.google.android.gms.cast.framework.SessionManager
+import com.google.android.gms.cast.framework.SessionManagerListener
+import dev.abhi.arvex.cast.CastMediaItemConverter
+import dev.abhi.arvex.cast.CastOptionsProvider
 import java.io.File
 import java.net.ConnectException
 import java.net.SocketTimeoutException
@@ -155,7 +168,8 @@ import kotlin.math.pow
 @AndroidEntryPoint
 class MusicService : MediaLibraryService(),
     Player.Listener,
-    PlaybackStatsListener.Callback {
+    PlaybackStatsListener.Callback,
+    SessionManagerListener<CastSession> {
     val TAG = MusicService::class.simpleName.toString()
 
     @Inject
@@ -188,7 +202,15 @@ class MusicService : MediaLibraryService(),
     @DownloadCache
     lateinit var downloadCache: SimpleCache
 
-    lateinit var player: ExoPlayer
+    lateinit var localPlayer: ExoPlayer
+    var castPlayer: CastPlayer? = null
+    private var _currentPlayer: Player? = null
+    val player: Player
+        get() = _currentPlayer ?: localPlayer
+
+    private val _playerFlow = MutableStateFlow<Player?>(null)
+    val playerFlow = _playerFlow.asStateFlow()
+
     private lateinit var mediaSession: MediaLibrarySession
 
     // Player components
@@ -218,6 +240,9 @@ class MusicService : MediaLibraryService(),
     private val isGaplessOffloadAllowed = dataStore.get(AudioGaplessOffloadKey, false)
     val playerVolume = MutableStateFlow(dataStore.get(PlayerVolumeKey, 1f).coerceIn(0f, 1f))
 
+    // Cache for resolved URLs to avoid re-fetching and rate limiting
+    private val songUrlCache = ConcurrentHashMap<String, Pair<String, Long>>()
+
     private var isAudioEffectSessionOpened = false
 
     var consecutivePlaybackErr = 0
@@ -226,7 +251,7 @@ class MusicService : MediaLibraryService(),
         Log.i(TAG, "Starting MusicService")
         super.onCreate()
 
-        player = ExoPlayer.Builder(this)
+        localPlayer = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(createDataSourceFactory()))
             .setRenderersFactory(createRenderersFactory(isGaplessOffloadAllowed))
             .setHandleAudioBecomingNoisy(true)
@@ -235,10 +260,12 @@ class MusicService : MediaLibraryService(),
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
                     .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-                    .build(), true
+                    .build(),
+                true
             )
             .setSeekBackIncrementMs(5000)
             .setSeekForwardIncrementMs(5000)
+            .setSkipSilenceEnabled(dataStore.get(SkipSilenceKey, false))
             .build()
             .apply {
                 // listeners
@@ -246,10 +273,28 @@ class MusicService : MediaLibraryService(),
                 sleepTimer = SleepTimer(scope, this)
                 addListener(sleepTimer)
                 addAnalyticsListener(PlaybackStatsListener(false, this@MusicService))
+                _playerFlow.value = this
 
                 // misc
-                setOffloadEnabled(dataStore.get(AudioOffloadKey, false))
+                if (dataStore.get(AudioOffloadKey, false)) {
+                     // cast to ExoPlayer or use extension if available, but setOffloadEnabled is usually extension
+                     // Assuming setOffloadEnabled is an extension function on ExoPlayer
+                     setOffloadEnabled(true)
+                }
             }
+
+        // Cast Init
+        try {
+            val castContext = CastContext.getSharedInstance(this)
+            castPlayer = CastPlayer(castContext, CastMediaItemConverter())
+            castPlayer?.addListener(this)
+            castContext.sessionManager.addSessionManagerListener(this, CastSession::class.java)
+        } catch (e: Exception) {
+             Log.e(TAG, "Cast Init failed", e)
+             // Fallback if Cast not available
+        }
+
+        _currentPlayer = localPlayer
 
         mediaLibrarySessionCallback.apply {
             service = this@MusicService
@@ -271,7 +316,7 @@ class MusicService : MediaLibraryService(),
             .setBitmapLoader(CoilBitmapLoader(this))
             .build()
 
-        player.repeatMode = dataStore.get(RepeatModeKey, REPEAT_MODE_OFF)
+        localPlayer.repeatMode = dataStore.get(RepeatModeKey, REPEAT_MODE_OFF)
 
         // Keep a connected controller so that notification works
         val sessionToken = SessionToken(this, ComponentName(this, MusicService::class.java))
@@ -322,7 +367,9 @@ class MusicService : MediaLibraryService(),
                 .distinctUntilChanged()
                 .collectLatest(scope) {
                     withContext(Dispatchers.Main) {
-                        player.skipSilenceEnabled = it
+                         if (player !is CastPlayer) {
+                            localPlayer.skipSilenceEnabled = it
+                         }
                     }
                 }
 
@@ -606,7 +653,7 @@ class MusicService : MediaLibraryService(),
         isAudioEffectSessionOpened = true
         sendBroadcast(
             Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION).apply {
-                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, player.audioSessionId)
+                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, localPlayer.audioSessionId)
                 putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
                 putExtra(AudioEffect.EXTRA_CONTENT_TYPE, AudioEffect.CONTENT_TYPE_MUSIC)
             }
@@ -618,7 +665,7 @@ class MusicService : MediaLibraryService(),
         isAudioEffectSessionOpened = false
         sendBroadcast(
             Intent(AudioEffect.ACTION_CLOSE_AUDIO_EFFECT_CONTROL_SESSION).apply {
-                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, player.audioSessionId)
+                putExtra(AudioEffect.EXTRA_AUDIO_SESSION, localPlayer.audioSessionId)
                 putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
             }
         )
@@ -654,7 +701,6 @@ class MusicService : MediaLibraryService(),
     }
 
     private fun createDataSourceFactory(): DataSource.Factory {
-        val songUrlCache = HashMap<String, Pair<String, Long>>()
         return ResolvingDataSource.Factory(createCacheDataSource()) { dataSpec ->
             val mediaId = dataSpec.key ?: error("No media id")
             Log.d(TAG, "PLAYING: song id = $mediaId")
@@ -819,7 +865,7 @@ class MusicService : MediaLibraryService(),
                 CommandButton.Builder(ICON_UNDEFINED)
                     .setDisplayName(getString(if (queueBoard.getCurrentQueue()?.shuffled == true) R.string.action_shuffle_off else R.string.action_shuffle_on))
                     .setSessionCommand(CommandToggleShuffle)
-                    .setCustomIconResId(if (player.shuffleModeEnabled) R.drawable.shuffle_on else R.drawable.shuffle_off)
+                    .setCustomIconResId(if (queueBoard.getCurrentQueue()?.shuffled == true) R.drawable.shuffle_on else R.drawable.shuffle_off)
                     .build(),
                 CommandButton.Builder(ICON_UNDEFINED)
                     .setDisplayName(
@@ -1062,7 +1108,15 @@ class MusicService : MediaLibraryService(),
 
     override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
         val q = queueBoard.getCurrentQueue()
-        player.setShuffleOrder(ShuffleOrder.UnshuffledShuffleOrder(player.mediaItemCount))
+        
+        // Apply shuffle to ExoPlayer (needs custom shuffle order)
+        if (player is ExoPlayer) {
+             (player as ExoPlayer).setShuffleOrder(ShuffleOrder.UnshuffledShuffleOrder(player.mediaItemCount))
+        }
+        
+        // CastPlayer handles shuffle internally, just set the mode
+        player.shuffleModeEnabled = shuffleModeEnabled
+        
         if (q == null || q.shuffled == shuffleModeEnabled) return
         triggerShuffle()
     }
@@ -1072,7 +1126,11 @@ class MusicService : MediaLibraryService(),
         session: MediaSession,
         startInForegroundRequired: Boolean,
     ) {
-        // FG keep alive
+        // listeners
+        val skipSilenceEnabled = dataStore.get(SkipSilenceKey, false)
+        if (skipSilenceEnabled && !(player is CastPlayer)) {
+            localPlayer.skipSilenceEnabled = skipSilenceEnabled
+        }
         if (player.isPlaying || !dataStore.get(KeepAliveKey, false)) {
             super.onUpdateNotification(session, startInForegroundRequired)
         }
@@ -1109,7 +1167,279 @@ class MusicService : MediaLibraryService(),
             get() = this@MusicService
     }
 
+
+    // Cast Session Management
+    override fun onSessionStarting(session: CastSession) {}
+    
+    override fun onSessionStarted(session: CastSession, sessionId: String) {
+        Log.d(TAG, "Cast Session Started")
+        castPlayer?.let { switchPlayer(it) }
+    }
+
+    override fun onSessionStartFailed(session: CastSession, error: Int) {
+        Log.e(TAG, "Cast Session Start Failed: $error")
+    }
+
+    override fun onSessionEnding(session: CastSession) {
+        Log.d(TAG, "Cast Session Ending")
+        // Don't switch back yet, wait for ended
+    }
+
+    override fun onSessionEnded(session: CastSession, error: Int) {
+        Log.d(TAG, "Cast Session Ended")
+        switchPlayer(localPlayer)
+    }
+
+    override fun onSessionResuming(session: CastSession, sessionId: String) {}
+
+    override fun onSessionResumed(session: CastSession, wasSuspended: Boolean) {
+        Log.d(TAG, "Cast Session Resumed")
+        castPlayer?.let { switchPlayer(it) }
+    }
+
+    override fun onSessionResumeFailed(session: CastSession, error: Int) {}
+
+    override fun onSessionSuspended(session: CastSession, reason: Int) {}
+
+    private fun switchPlayer(newPlayer: Player) {
+        if (_currentPlayer == newPlayer) return
+
+        val previousPlayer = _currentPlayer ?: localPlayer
+        
+        // Save state
+        var playbackPositionMs = C.TIME_UNSET
+        var currentMediaItemIndex = 0
+        var playWhenReady = previousPlayer.playWhenReady
+        
+        if (previousPlayer.playbackState != Player.STATE_IDLE && previousPlayer.playbackState != Player.STATE_ENDED) {
+            playbackPositionMs = previousPlayer.currentPosition
+            currentMediaItemIndex = previousPlayer.currentMediaItemIndex
+        }
+        val currentMediaItem = previousPlayer.currentMediaItem
+
+        // Stop previous player
+        previousPlayer.stop()
+        previousPlayer.clearMediaItems()
+        
+        if (previousPlayer == localPlayer) {
+            // Audio focus released by stop()
+        }
+
+        // Update current player
+        _currentPlayer = newPlayer
+        _playerFlow.value = newPlayer
+        
+        // Update MediaSession
+        mediaSession.player = newPlayer
+
+        // Get current queue from QueueBoard
+        val currentQueue = queueBoard.getCurrentQueue()
+        
+        if (currentQueue != null && currentQueue.queue.isNotEmpty()) {
+            // Snapshot the queue to avoid ConcurrentModificationException if the live queue changes
+            // while we are resolving URLs in the background.
+            val queueSnapshot = currentQueue.queue.toList()
+            
+            // We have a queue to transfer
+            scope.launch {
+                if (newPlayer == castPlayer) {
+                    val itemsToMap = if (currentQueue.shuffled) currentQueue.getCurrentQueueShuffled() else currentQueue.queue
+                    val itemsToTransfer = itemsToMap.map { it.toMediaItem() }
+                    
+                    val resolvedItems = resolveMediaItemsForCast(itemsToTransfer)
+                    
+                    if (resolvedItems.isNotEmpty()) {
+                        var newStartIndex = 0
+                        val currentSongId = currentQueue.getCurrentSong()?.id
+                        if (currentSongId != null) {
+                             val foundIndex = resolvedItems.indexOfFirst { it.mediaId == currentSongId }
+                             if (foundIndex != -1) newStartIndex = foundIndex
+                        }
+
+                        newPlayer.setMediaItems(resolvedItems, newStartIndex, playbackPositionMs)
+                        newPlayer.shuffleModeEnabled = false // Force linear playback as we provided a shuffled list
+                        newPlayer.repeatMode = previousPlayer.repeatMode
+                        newPlayer.prepare()
+                        newPlayer.playWhenReady = playWhenReady
+                    }
+                } else {
+                    val itemsToTransfer = queueSnapshot.map { it.toMediaItem() }
+                    
+                    // Find correct index in local queue using current song ID
+                    var localStartIndex = 0
+                    val currentSongId = currentQueue.getCurrentSong()?.id
+                    if (currentSongId != null) {
+                        val foundIndex = itemsToTransfer.indexOfFirst { it.mediaId == currentSongId }
+                        if (foundIndex != -1) localStartIndex = foundIndex
+                    }
+                    
+                    newPlayer.setMediaItems(itemsToTransfer, localStartIndex, playbackPositionMs)
+                    newPlayer.shuffleModeEnabled = currentQueue.shuffled
+                    newPlayer.repeatMode = previousPlayer.repeatMode
+                    newPlayer.prepare()
+                    newPlayer.playWhenReady = playWhenReady
+                    
+                    // Update UI state after player switch
+                    updateNotification()
+                }
+            }
+        } else if (currentMediaItem != null && playbackPositionMs != C.TIME_UNSET) {
+            // Fallback: single item transfer
+            scope.launch {
+                if (newPlayer == castPlayer) {
+                    val resolvedItems = resolveMediaItemsForCast(listOf(currentMediaItem))
+                    if (resolvedItems.isNotEmpty()) {
+                        newPlayer.setMediaItems(resolvedItems, 0, playbackPositionMs)
+                        newPlayer.shuffleModeEnabled = previousPlayer.shuffleModeEnabled
+                        newPlayer.repeatMode = previousPlayer.repeatMode
+                        newPlayer.prepare()
+                        newPlayer.playWhenReady = playWhenReady
+                    }
+                } else {
+                    newPlayer.setMediaItems(listOf(currentMediaItem), 0, playbackPositionMs)
+                    newPlayer.shuffleModeEnabled = previousPlayer.shuffleModeEnabled
+                    newPlayer.repeatMode = previousPlayer.repeatMode
+                    newPlayer.prepare()
+                    newPlayer.playWhenReady = playWhenReady
+                }
+            }
+        }
+        // If no queue and no current item, newPlayer stays empty (idle state)
+    }
+
+    // Helper for URL Resolution
+    suspend fun resolveMediaItemsForCast(items: List<MediaItem>): List<MediaItem> {
+        // Process in chunks to avoid spamming network requests too hard
+        return items.chunked(5).map { chunk ->
+            chunk.map { item ->
+                scope.async(Dispatchers.IO) {
+                    val resolvedUrl = resolveMediaItem(item.mediaId)
+                    if (resolvedUrl != null) {
+                        item.buildUpon()
+                            .setUri(resolvedUrl)
+                            .build()
+                    } else {
+                        null
+                    }
+                }
+            }.awaitAll()
+        }.flatten().filterNotNull()
+    }
+
+    suspend fun resolveMediaItem(mediaId: String): String? {
+            // Check cache first
+            songUrlCache[mediaId]?.takeIf { it.second > System.currentTimeMillis() }?.let {
+                Log.d(TAG, "RESOLVE: Cache hit for $mediaId")
+                return it.first
+            }
+
+            // Check db/local
+            val song = database.song(mediaId).first()?.toMediaMetadata() ?: return null
+            if (song.isLocal) {
+                    Log.w(TAG, "Cannot cast local file without HTTP server: ${song.localPath}")
+                    return null
+            }
+
+            // Remote
+            return try {
+                val playbackData = withContext(Dispatchers.IO) {
+                    val audioQuality by enumPreference(this@MusicService, AudioQualityKey, AudioQuality.AUTO)
+                    YTPlayerUtils.playerResponseForPlayback(
+                        mediaId,
+                        audioQuality = audioQuality,
+                        connectivityManager = connectivityManager,
+                    )
+                }.getOrThrow()
+                
+                val streamUrl = playbackData.streamUrl
+                // Cache the result
+                if (playbackData.streamExpiresInSeconds > 0) {
+                    songUrlCache[mediaId] = streamUrl to (System.currentTimeMillis() + (playbackData.streamExpiresInSeconds * 1000L))
+                }
+                
+                streamUrl
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to resolve URL for Cast", e)
+                null
+            }
+    }
+
+
+    // Facade for QueueBoard
+    val isCasting: Boolean get() = castPlayer != null && _currentPlayer == castPlayer
+
+    fun clearMediaItems() {
+        player.clearMediaItems()
+    }
+
+    fun addMediaItems(items: List<MediaItem>) {
+        if (isCasting) {
+             scope.launch {
+                  val resolved = resolveMediaItemsForCast(items)
+                  if (resolved.isNotEmpty()) {
+                       castPlayer?.addMediaItems(resolved)
+                  }
+             }
+         } else {
+             localPlayer.addMediaItems(items)
+         }
+    }
+
+    fun setMediaItems(items: List<MediaItem>, startIndex: Int, startPositionMs: Long) {
+         if (isCasting) {
+             scope.launch {
+                 val resolvedItems = resolveMediaItemsForCast(items)
+                 // Find new startIndex if items were filtered
+                 var newStartIndex = 0
+                 val originalStartItem = items.getOrNull(startIndex)
+                 if (originalStartItem != null) {
+                     val foundIndex = resolvedItems.indexOfFirst { it.mediaId == originalStartItem.mediaId }
+                     if (foundIndex != -1) newStartIndex = foundIndex
+                 }
+
+                 if (resolvedItems.isNotEmpty()) {
+                      castPlayer?.setMediaItems(resolvedItems, newStartIndex, startPositionMs)
+                      castPlayer?.prepare()
+                      castPlayer?.play()
+                 }
+            }
+         } else {
+             localPlayer.setMediaItems(items, startIndex, startPositionMs)
+             localPlayer.prepare()
+             localPlayer.play()
+         }
+    }
+    
+    fun addMediaItems(index: Int, items: List<MediaItem>) {
+         if (isCasting) {
+             scope.launch {
+                 val resolved = resolveMediaItemsForCast(items)
+                 if (resolved.isNotEmpty()) {
+                     castPlayer?.addMediaItems(index, resolved)
+                 }
+             }
+         } else {
+             localPlayer.addMediaItems(index, items)
+         }
+    }
+
+    fun removeMediaItems(fromIndex: Int, toIndex: Int) {
+        player.removeMediaItems(fromIndex, toIndex)
+    }
+    
+    fun replaceMediaItems(fromIndex: Int, toIndex: Int, items: List<MediaItem>) {
+         if (isCasting) {
+             scope.launch {
+                 val resolved = resolveMediaItemsForCast(items)
+                 castPlayer?.replaceMediaItems(fromIndex, toIndex, resolved)
+             }
+         } else {
+             localPlayer.replaceMediaItems(fromIndex, toIndex, items)
+         }
+    }
+
     companion object {
+
         const val ROOT = "root"
         const val SONG = "song"
         const val ARTIST = "artist"

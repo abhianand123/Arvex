@@ -753,7 +753,7 @@ class QueueBoard(
         )
 
         if (item == null || item.queue.isEmpty()) {
-            player.player.setMediaItems(ArrayList())
+            player.clearMediaItems()
             return null
         }
 
@@ -784,25 +784,25 @@ class QueueBoard(
                 // player.player.replaceMediaItems seems to stop playback so we
                 // remove all songs except the currently playing one and then add the list of new items
                 if (playerIndex < playerItemCount - 1) {
-                    player.player.removeMediaItems(playerIndex + 1, playerItemCount)
+                    player.removeMediaItems(playerIndex + 1, playerItemCount)
                 }
                 if (playerIndex > 0) {
-                    player.player.removeMediaItems(0, playerIndex)
+                    player.removeMediaItems(0, playerIndex)
                 }
                 // add all songs except the first one since it is already present and playing
-                player.player.addMediaItems(mediaItems.drop(1).map { it.toMediaItem() })
+                player.addMediaItems(mediaItems.drop(1).map { it.toMediaItem() })
             } else {
                 // replace items up to current playing, then replace items after current
-                player.player.replaceMediaItems(
+                player.replaceMediaItems(
                     0, playerIndex,
                     mediaItems.subList(0, queuePos).map { it.toMediaItem() })
-                player.player.replaceMediaItems(
+                player.replaceMediaItems(
                     queuePos + 1, Int.MAX_VALUE,
                     mediaItems.subList(queuePos + 1, mediaItems.size).map { it.toMediaItem() })
             }
         } else {
             Log.d(TAG, "Seamless is not supported. Loading songs in directly")
-            player.player.setMediaItems(mediaItems.map { it.toMediaItem() }, queuePos, lastSongPos)
+            player.setMediaItems(mediaItems.map { it.toMediaItem() }, queuePos, lastSongPos)
         }
 
         bubbleUp(item)

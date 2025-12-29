@@ -25,6 +25,7 @@ Arvex is a supercharged fork of [InnerTune](https://github.com/z-huang/InnerTune
     - Audio effects
 - **Lyrics**: Synchronized lyrics (LRC, TTML) and Karaoke support
 - **Android Auto**: Full support
+- **Chromecast**: Stream music to Chromecast devices seamlessly
 - **Compatibility**: Android 8 (Oreo) and higher
 
 
