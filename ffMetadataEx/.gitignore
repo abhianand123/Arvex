@@ -1,0 +1,4 @@
+/build
+/.cxx
+/src/main/cpp/src/main/jniLibs
+/ffmpeg-android-maker
