@@ -13,6 +13,7 @@ plugins {
     alias(libs.plugins.kotlin.ksp)
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.aboutlibraries)
+    alias(libs.plugins.kotlin.serialization)
 }
 
 val keystorePropertiesFile = rootProject.file("keystore.properties")
@@ -243,6 +244,8 @@ dependencies {
 
     implementation("androidx.media3:media3-cast:1.5.0") // Using 1.5.0 to match other media3 libs if possible, or latest. Plan said 1.8.0 but toml has 1.8.0 so I will use version ref if possible or hardcode for now to be safe. Actually, the toml defines media3 version as 1.8.0, so I should try to reuse that if I can or just hardcode for this step to ensuring compatibility.
     implementation("com.google.android.gms:play-services-cast-framework:21.5.0")
+    implementation(libs.play.services.nearby)
+    implementation(libs.play.services.location)
     implementation("androidx.mediarouter:mediarouter:1.7.0")
     implementation("androidx.appcompat:appcompat:1.7.0")
 

@@ -26,6 +26,11 @@ Arvex is a supercharged fork of [InnerTune](https://github.com/z-huang/InnerTune
 - **Lyrics**: Synchronized lyrics (LRC, TTML) and Karaoke support
 - **Android Auto**: Full support
 - **Chromecast**: Stream music to Chromecast devices seamlessly
+- **Mesh Sync Room**:
+    - **P2P Playback**: Sync music with nearby friends offline via Wi-Fi Direct/Hotspot.
+    - **Smart Metadata**: Automatically fetches song details for peers so everyone sees the correct title/cover.
+    - **Radar View**: visualize friends' location and direction relative to you.
+    - **Chain Sync**: One host controls the party, everyone listens in perfect sync.
 - **Compatibility**: Android 8 (Oreo) and higher
 
 

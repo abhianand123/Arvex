@@ -163,6 +163,12 @@ import java.time.LocalDateTime
 import javax.inject.Inject
 import kotlin.math.min
 import kotlin.math.pow
+import kotlin.math.abs
+import dev.abhi.arvex.mesh.MeshManager
+import dev.abhi.arvex.mesh.SpatialAwarenessManager
+import dev.abhi.arvex.mesh.PrecisionTimeSync
+import dev.abhi.arvex.mesh.SyncAudioPayload
+
 
 @OptIn(ExperimentalCoroutinesApi::class, FlowPreview::class)
 @AndroidEntryPoint
@@ -186,6 +192,15 @@ class MusicService : MediaLibraryService(),
 
     @Inject
     lateinit var mediaLibrarySessionCallback: MediaLibrarySessionCallback
+
+    @Inject
+    lateinit var meshManager: MeshManager
+
+    @Inject
+    lateinit var spatialManager: SpatialAwarenessManager
+
+    @Inject
+    lateinit var timeSync: PrecisionTimeSync
 
     private val binder = MusicBinder()
     private lateinit var connectivityManager: ConnectivityManager
@@ -410,7 +425,150 @@ class MusicService : MediaLibraryService(),
                     }
                 }
             }
+            
+            // Mesh Sync Listener
+            // Listen for new connections to send initial state ONLY to them
+            offloadScope.launch {
+                var previousEndpoints = emptyList<String>()
+                meshManager.connectedEndpoints.collect { currentEndpoints ->
+                    val newEndpoints = currentEndpoints - previousEndpoints.toSet()
+                    if (newEndpoints.isNotEmpty()) {
+                        // A new peer joined! Send them the current state directly.
+                        newEndpoints.forEach { newPeerId ->
+                            Log.d(TAG, "New peer joined: $newPeerId. Sending initial sync state.")
+                            launch(Dispatchers.Main) {
+                                val mediaId = player.currentMediaItem?.mediaId
+                                if (mediaId != null) {
+                                    val payload = SyncAudioPayload(
+                                        senderId = meshManager.myEndpointId,
+                                        targetId = newPeerId, // Target specific peer
+                                        audioId = mediaId,
+                                        positionMs = player.currentPosition,
+                                        isPlaying = player.isPlaying,
+                                        playbackSpeed = player.playbackParameters.speed,
+                                        targetPlayTimeMs = 0
+                                    )
+                                    // Send payload (IO safe)
+                                    withContext(Dispatchers.IO) {
+                                        meshManager.sendPayload(payload, targetEndpointId = newPeerId)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    previousEndpoints = currentEndpoints
+                }
+            }
+
+            offloadScope.launch {
+                meshManager.incomingPayloads.collect { payload ->
+                    if (payload is SyncAudioPayload) {
+                         if (payload.senderId == meshManager.myEndpointId) return@collect
+                         
+                         withContext(Dispatchers.Main) {
+                             if (player.currentMediaItem?.mediaId != payload.audioId) {
+                                  // Switch Song
+                                  Log.d(TAG, "Mesh Sync: Switching to new song ${payload.audioId}")
+                                  val song = withContext(Dispatchers.IO) {
+                                      // Try Local DB
+                                      database.song(payload.audioId).first()?.toMediaMetadata() ?: run {
+                                          // Try Network Fetch
+                                          try {
+                                              val response = YTPlayerUtils.playerResponseForMetadata(payload.audioId).getOrNull()
+                                              response?.videoDetails?.let { details ->
+                                                  MediaMetadata(
+                                                      id = details.videoId,
+                                                      title = details.title,
+                                                      artists = listOf(MediaMetadata.Artist(id = details.author, name = details.author)),
+                                                      thumbnailUrl = details.thumbnail.thumbnails.maxByOrNull { it.width ?: 0 }?.url,
+                                                      duration = details.lengthSeconds.toInt(),
+                                                      genre = null
+                                                  )
+                                              }
+                                          } catch (e: Exception) {
+                                              null
+                                          }
+                                      }
+                                  } ?: MediaMetadata(
+                                      id = payload.audioId,
+                                      title = "Syncing...",
+                                      artists = listOf(MediaMetadata.Artist(id = null, name = "Mesh Network")),
+                                      thumbnailUrl = null,
+                                      duration = -1,
+                                      genre = null
+                                  )
+                                  
+                                  // Create a 1-item queue and play
+                                  playQueue(
+                                      queue = ListQueue(
+                                          title = "Synced Session",
+                                          items = listOf(song)
+                                      ),
+                                      playWhenReady = true
+                                  )
+                                  
+                                  return@withContext 
+                              }
+                             
+                             val myTime = timeSync.getMeshTime()
+                             val elapsedSinceSend = myTime - payload.timestamp
+                             val targetPos = payload.positionMs + (if (payload.isPlaying) elapsedSinceSend * payload.playbackSpeed else 0).toLong()
+                             
+                             val currentPos = player.currentPosition
+                             val diff = targetPos - currentPos
+                             
+                             if (abs(diff) > 50) {
+                                 if (abs(diff) > 2000) {
+                                     player.seekTo(targetPos)
+                                 } else {
+                                     // Micro adjustment
+                                     // If we are BEHIND (diff > 0), speed up.
+                                     // If we are AHEAD (diff < 0), slow down.
+                                     val newSpeed = if (diff > 0) 1.05f else 0.95f
+                                     player.setPlaybackSpeed(newSpeed)
+                                     
+                                     // Revert speed after catch up (approx 1 sec later)
+                                     scope.launch {
+                                         delay(1000)
+                                         player.setPlaybackSpeed(payload.playbackSpeed)
+                                     }
+                                 }
+                             } else {
+                                 if (player.playbackParameters.speed != payload.playbackSpeed) {
+                                     player.setPlaybackSpeed(payload.playbackSpeed)
+                                 }
+                             }
+
+                             if (payload.isPlaying && !player.isPlaying) player.play()
+                             if (!payload.isPlaying && player.isPlaying) player.pause()
+                         }
+                    }
+                }
+            }
         }
+    }
+    
+
+    
+    private var lastBroadcastTime = 0L
+    private fun broadcastSyncState(force: Boolean = false) {
+        if (meshManager.connectedEndpoints.value.isEmpty()) return
+        
+        // Debounce slightly to avoid flood during rapid seeks, but keep it snappy
+        val now = System.currentTimeMillis()
+        if (!force && now - lastBroadcastTime < 250) return // Reduced debounce from 500ms to 250ms for snappier seeking
+        lastBroadcastTime = now
+        
+        val mediaId = player.currentMediaItem?.mediaId ?: return
+        val payload = SyncAudioPayload(
+            senderId = meshManager.myEndpointId,
+            audioId = mediaId,
+            positionMs = player.currentPosition,
+            isPlaying = player.isPlaying,
+            playbackSpeed = player.playbackParameters.speed,
+            targetPlayTimeMs = 0 // Immediate for now
+        )
+        meshManager.sendPayload(payload)
     }
 
 
@@ -970,10 +1128,17 @@ class MusicService : MediaLibraryService(),
             q?.lastSongPos = pos
         }
         super.onIsPlayingChanged(isPlaying)
+        broadcastSyncState()
+    }
+
+    override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+        super.onPositionDiscontinuity(oldPosition, newPosition, reason)
+        broadcastSyncState()
     }
 
     override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
         super.onMediaItemTransition(mediaItem, reason)
+        broadcastSyncState(force = true) // Force update on song change
         // +2 when and error happens, and -1 when transition. Thus when error, number increments by 1, else doesn't change
         if (consecutivePlaybackErr > 0) {
             consecutivePlaybackErr--

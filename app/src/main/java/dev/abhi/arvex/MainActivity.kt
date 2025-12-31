@@ -766,6 +766,14 @@ class MainActivity : AppCompatActivity() {
                                     composable("setup_wizard") {
                                         SetupWizard(navController)
                                     }
+                                    
+                                    composable("mesh_room") {
+                                        dev.abhi.arvex.ui.screens.mesh.MeshRoomScreen(
+                                            navController, 
+                                            playerConnection!!.service.meshManager,
+                                            playerConnection!!.service.spatialManager
+                                        )
+                                    }
                                 }
                             }
 
